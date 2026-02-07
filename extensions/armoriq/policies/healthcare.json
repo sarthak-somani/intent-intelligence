@@ -1,0 +1,28 @@
+[
+  {
+    "id": "budget_check",
+    "description": "Standard agents cannot spend more than 2000 INR without human approval",
+    "target_tool": "pharmacy",
+    "condition": {
+      "and": [
+        { "op": "gt", "var": "args.cost", "val": 2000 },
+        { "op": "eq", "var": "context.principal_role", "val": "automated_agent" }
+      ]
+    },
+    "effect": "DENY",
+    "reason": "Automated spend limit exceeded (Max: 2000 INR)"
+  },
+  {
+    "id": "delegation_privacy",
+    "description": "Caretakers can ONLY access medical records if they have the specific scope",
+    "target_tool": "records",
+    "condition": {
+      "and": [
+        { "op": "eq", "var": "context.principal_role", "val": "caretaker" },
+        { "op": "missing_scope", "var": "context.token_scopes", "val": "patient:records:read" }
+      ]
+    },
+    "effect": "DENY",
+    "reason": "Delegation Token missing required scope: 'patient:records:read'"
+  }
+]
