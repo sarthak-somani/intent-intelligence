@@ -2,6 +2,8 @@ import type { AnyAgentTool } from "./tools/common.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { getGlobalHookRunner } from "../plugins/hook-runner-global.js";
 import { normalizeToolName } from "./tool-policy.js";
+// ArmorIQ Guardian Integration
+import { proxy as guardianProxy } from "../../extensions/armoriq/src/guardian-proxy.js";
 
 type HookContext = {
   agentId?: string;
@@ -17,6 +19,7 @@ type HookContext = {
   csrgPath?: string;
   csrgProofRaw?: string;
   csrgValueDigest?: string;
+  lastUserMessage?: string; // Added for intent verification
 };
 
 type HookOutcome = { blocked: true; reason: string } | { blocked: false; params: unknown };
@@ -34,12 +37,42 @@ export async function runBeforeToolCallHook(args: {
   ctx?: HookContext;
 }): Promise<HookOutcome> {
   const hookRunner = getGlobalHookRunner();
+  const toolName = normalizeToolName(args.toolName || "tool");
+  const params = args.params;
+
+  // ================================================================
+  // ArmorIQ Guardian Validation (5-Tier Defense)
+  // ================================================================
+  try {
+    const resolvedToken = args.ctx?.intentTokenRaw || "";
+    const lastUserMessage = args.ctx?.lastUserMessage || "";
+
+    // Only run Guardian validation if we have a token
+    if (resolvedToken) {
+      await guardianProxy.validateAndLog({
+        token: resolvedToken,
+        tool: toolName,
+        args: isPlainObject(params) ? params : {},
+        prompt: lastUserMessage,
+      });
+      log.info(`[ArmorIQ] Tool call validated: ${toolName}`);
+    }
+  } catch (guardianError) {
+    // Guardian blocked the call - return blocked outcome
+    log.warn(`[ArmorIQ] Tool call blocked: ${toolName} - ${String(guardianError)}`);
+    return {
+      blocked: true,
+      reason: String(guardianError),
+    };
+  }
+
+  // ================================================================
+  // Original Plugin Hook Logic
+  // ================================================================
   if (!hookRunner?.hasHooks("before_tool_call")) {
     return { blocked: false, params: args.params };
   }
 
-  const toolName = normalizeToolName(args.toolName || "tool");
-  const params = args.params;
   try {
     const normalizedParams = isPlainObject(params) ? params : {};
     const hookResult = await hookRunner.runBeforeToolCall(

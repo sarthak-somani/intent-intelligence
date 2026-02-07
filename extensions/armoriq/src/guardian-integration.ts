@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import { MerkleLedger, LedgerEntry } from "./ledger";
 import { PolicyEngine, PolicyDecision, EvaluationContext } from "./policy-engine";
 import { AuthAuthority, TokenPayload, TokenInput } from "./auth-authority";
+import { IntentVerifier, IntentVerificationResult } from "./intent-verifier";
 
 // Get current directory for ESM modules
 const __filename = fileURLToPath(import.meta.url);
@@ -30,11 +31,13 @@ export class ArmorIQGuardian {
     private ledger: MerkleLedger;
     private policy: PolicyEngine;
     private auth: AuthAuthority;
+    private intentVerifier: IntentVerifier;
 
     constructor() {
         this.ledger = new MerkleLedger();
         this.policy = new PolicyEngine();
         this.auth = new AuthAuthority();
+        this.intentVerifier = new IntentVerifier();
 
         // Load default healthcare policies
         const policiesPath = join(__dirname, "..", "policies", "healthcare.json");
@@ -55,17 +58,19 @@ export class ArmorIQGuardian {
     }
 
     /**
-     * Validate a request against authentication, policy, and audit requirements
+     * Validate a request against authentication, intent, policy, and audit requirements
      * @param token - JWT token string
      * @param tool - The tool being called
      * @param args - Arguments passed to the tool
-     * @returns ValidationResult with detailed outcome
-     * @throws Error if token is invalid or policy denies the request
+     * @param userPrompt - The user's original prompt for intent verification
+     * @returns true if allowed
+     * @throws Error if token is invalid, intent mismatch, or policy denies
      */
     public async validateRequest(
         token: string,
         tool: string,
-        args: any
+        args: any,
+        userPrompt: string = ""
     ): Promise<boolean> {
         // Step 1: Verify Token
         const tokenPayload = this.auth.verifyToken(token);
@@ -79,13 +84,29 @@ export class ArmorIQGuardian {
             throw new Error("Unauthorized: Invalid or expired token");
         }
 
-        // Step 2: Build evaluation context from token
+        // Step 2: Intent Verification (NEW)
+        const intentResult = this.intentVerifier.validate(userPrompt, tool, args);
+        if (intentResult.riskLevel === "HIGH") {
+            // Log the intent warning
+            this.ledger.append(tokenPayload.principal_role, "INTENT_WARNING", {
+                tool,
+                args,
+                userPrompt: userPrompt.substring(0, 100), // Truncate for logging
+                risk: "HIGH",
+                warning: intentResult.warning,
+            });
+            throw new Error(
+                `[Guardian] 🧠 Intent Mismatch: User did not authorize high-risk action '${tool}'. ${intentResult.warning || ""}`
+            );
+        }
+
+        // Step 3: Build evaluation context from token
         const context: EvaluationContext = {
             principal_role: tokenPayload.principal_role,
             token_scopes: tokenPayload.token_scopes,
         };
 
-        // Step 3: Check Policy
+        // Step 4: Check Policy
         const policyDecision = this.policy.evaluate(tool, args, context);
         if (!policyDecision.allowed) {
             // Log the policy violation
@@ -98,10 +119,11 @@ export class ArmorIQGuardian {
             throw new Error(`Policy Violation: ${policyDecision.reason}`);
         }
 
-        // Step 4: Log successful request to Ledger
+        // Step 5: Log successful request to Ledger
         this.ledger.append(tokenPayload.principal_role, "TOOL_CALL", {
             tool,
             args,
+            userPrompt: userPrompt.substring(0, 100),
             decision: "ALLOWED",
         });
 
@@ -198,7 +220,15 @@ export class ArmorIQGuardian {
             ledger: this.ledger,
             policy: this.policy,
             auth: this.auth,
+            intentVerifier: this.intentVerifier,
         };
+    }
+
+    /**
+     * Verify intent only (without full validation)
+     */
+    public verifyIntent(userPrompt: string, tool: string, args: any): IntentVerificationResult {
+        return this.intentVerifier.validate(userPrompt, tool, args);
     }
 }
 
